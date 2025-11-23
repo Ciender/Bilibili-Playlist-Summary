@@ -1,189 +1,141 @@
 // ==UserScript==
-// @name         Bilibili Video List Summary
+// @name         Bilibili Video List Summary (Text Mode)
 // @namespace    http://tampermonkey.net/
-// @version      1.9
-// @description  Calculates and displays video list summary at the TOP of the video description text. Ensures description container height is auto.
-// @match        *://www.bilibili.com/video/BV*
+// @version      2.1
+// @description  在视频简介顶部显示合集统计信息（纯文本模式，修复B站原生报错）
+// @match        https://www.bilibili.com/video/*
 // @grant        none
+// @run-at       document-idle
 // @license      MIT
 // ==/UserScript==
 
 (function() {
     'use strict';
 
-    // --- Selectors ---
-    const LIST_PRESENCE_SELECTOR = '.video-pod__list'; // To find the video list
-    const DURATION_ITEM_SELECTOR = '.video-pod__list .stat-item.duration'; // To get durations
-    const DESCRIPTION_TEXT_SELECTOR = 'span.desc-info-text'; // Target for insertion
-    const DESCRIPTION_CONTAINER_SELECTOR = '#v_desc'; // Element to observe for changes
-    const DESC_BASIC_INFO_SELECTOR = '.basic-desc-info'; // Parent div to set height auto
+    // --- 配置常量 ---
+    const SELECTORS = {
+        LIST_ITEMS: '.video-pod__list .stat-item.duration', // 列表时长元素
+        WRAPPER: '#v_desc', // 简介的最外层包裹器（插入位置的父级）
+        DESC_CONTENT: '.basic-desc-info', // 简介内容的敏感区域（插入位置的兄弟级）
+        SUMMARY_ID: 'bili-list-summary-text' // 我们的元素ID
+    };
 
-    // --- Constants ---
-    const SUMMARY_PREFIX = '[合集统计]'; // Unique identifier for our text
-    // Use a simpler marker for easier regex handling
-    const SUMMARY_MARKER = '<!-- BILI_SUMMARY -->';
+    // --- 样式注入 ---
+    const style = document.createElement('style');
+    style.innerHTML = `
+        /* 统计文本样式：仿原生，无框，一排字 */
+        #${SELECTORS.SUMMARY_ID} {
+            font-size: 14px;
+            color: #18191c; /* B站正文颜色 */
+            margin-bottom: 12px; /* 与下方简介拉开一点距离 */
+            line-height: 20px;
+            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+            font-weight: 500;
+        }
+        #${SELECTORS.SUMMARY_ID} span.gray-text {
+            color: #9499a0; /* 辅助文字灰色 */
+            margin: 0 4px;
+        }
+    `;
+    document.head.appendChild(style);
 
-    // --- State ---
-    let observer = null; // MutationObserver instance
-    let debounceTimer = null; // For debouncing observer callback
+    // --- 核心逻辑 ---
 
-    // --- Function to Calculate Summary String ---
-    function calculateSummaryString() {
-        const durationElements = document.querySelectorAll(DURATION_ITEM_SELECTOR);
-        if (!durationElements.length) return null;
+    /**
+     * 计算列表统计信息
+     */
+    function calculateSummary() {
+        const durationElements = document.querySelectorAll(SELECTORS.LIST_ITEMS);
+        const count = durationElements.length;
+
+        if (count === 0) return null;
 
         let totalSeconds = 0;
-        const videoCount = durationElements.length;
-        durationElements.forEach(el => { /* ... standard parsing logic ... */
-            const timeString = el.textContent.trim();
-            const parts = timeString.split(':');
-            if (parts.length === 2) {
-                const minutes = parseInt(parts[0], 10);
-                const seconds = parseInt(parts[1], 10);
-                if (!isNaN(minutes) && !isNaN(seconds)) totalSeconds += (minutes * 60) + seconds;
-            } else if (parts.length === 3) {
-                const hours = parseInt(parts[0], 10);
-                const minutes = parseInt(parts[1], 10);
-                const seconds = parseInt(parts[2], 10);
-                if (!isNaN(hours) && !isNaN(minutes) && !isNaN(seconds)) totalSeconds += (hours * 3600) + (minutes * 60) + seconds;
+        durationElements.forEach(el => {
+            const timeParts = el.textContent.trim().split(':').map(Number);
+            let seconds = 0;
+            if (timeParts.length === 2) {
+                seconds = timeParts[0] * 60 + timeParts[1];
+            } else if (timeParts.length === 3) {
+                seconds = timeParts[0] * 3600 + timeParts[1] * 60 + timeParts[2];
             }
+            if (!isNaN(seconds)) totalSeconds += seconds;
         });
 
-        if (videoCount === 0 || totalSeconds === 0) return null;
+        if (totalSeconds === 0) return null;
 
-        const totalHours = Math.floor(totalSeconds / 3600);
-        const totalMinutes = Math.floor((totalSeconds % 3600) / 60);
-        const remainingSecondsTotal = totalSeconds % 60;
-        const averageSecondsTotal = totalSeconds / videoCount;
-        const avgMinutes = Math.floor(averageSecondsTotal / 60);
-        const avgSeconds = Math.round(averageSecondsTotal % 60);
-        return `共 ${videoCount} P · 总 ${totalHours > 0 ? `${totalHours} 时 ${totalMinutes} 分` : `${totalMinutes} 分 ${remainingSecondsTotal} 秒`} · 平均 ${avgMinutes} 分 ${avgSeconds} 秒/P`;
+        const formatTime = (sec) => {
+            const h = Math.floor(sec / 3600);
+            const m = Math.floor((sec % 3600) / 60);
+            const s = Math.round(sec % 60);
+            return h > 0 ? `${h}小时${m}分` : `${m}分${s}秒`;
+        };
+
+        const avgSeconds = totalSeconds / count;
+
+        // 生成纯文本风格的 HTML
+        return `[合集统计] <span class="gray-text">·</span> 共 ${count} P <span class="gray-text">·</span> 总 ${formatTime(totalSeconds)} <span class="gray-text">·</span> 平均 ${formatTime(avgSeconds)}/P`;
     }
 
-    // --- Function to Update Description ---
-    function updateDescriptionWithSummary() {
-        const descSpan = document.querySelector(DESCRIPTION_TEXT_SELECTOR);
-        const descContainer = document.querySelector(DESCRIPTION_CONTAINER_SELECTOR); // For observer
-        const basicInfoDiv = descContainer ? descContainer.querySelector(DESC_BASIC_INFO_SELECTOR) : null; // Div to set height
+    /**
+     * 渲染逻辑
+     */
+    function renderSummary() {
+        // 1. 找到父容器 (#v_desc)
+        const wrapper = document.querySelector(SELECTORS.WRAPPER);
+        // 2. 找到兄弟元素 (.basic-desc-info)
+        // 注意：我们必须确保插在 basic-desc-info 之前，但不能插在它里面
+        const descContent = document.querySelector(SELECTORS.DESC_CONTENT);
 
-        if (!descSpan || !descContainer || !basicInfoDiv) {
-             console.log("Bilibili Summary: Description elements (span, container, basic-info) not found.");
-             if(observer) { observer.disconnect(); observer = null; }
+        if (!wrapper || !descContent) return;
+
+        const summaryHTML = calculateSummary();
+        let summaryEl = document.getElementById(SELECTORS.SUMMARY_ID);
+
+        // 如果没有合集数据（非合集视频），移除已存在的统计条
+        if (!summaryHTML) {
+            if (summaryEl) summaryEl.remove();
             return;
         }
 
-        // Calculate latest summary data
-        const summaryDataString = calculateSummaryString();
-
-        // Get current HTML and clean previously inserted summary (if any)
-        let currentHTML = descSpan.innerHTML;
-        // Escape prefix and marker for regex
-        const prefixEscaped = SUMMARY_PREFIX.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-        const markerEscaped = SUMMARY_MARKER.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
-        // Regex to find our summary line: prefix, any chars, marker, optional <br>s
-        const removalRegex = new RegExp(`^\\s*${prefixEscaped}.*?${markerEscaped}(\\s*<br>\\s*)*`, 'si');
-        let originalContent = currentHTML.replace(removalRegex, '').trim(); // Remove our old summary from the start
-
-        let finalHTML;
-
-        if (summaryDataString) {
-            // Construct the new summary line to prepend
-            const summaryLine = `${SUMMARY_PREFIX} ${summaryDataString}${SUMMARY_MARKER}<br><br>`;
-            // Combine: New summary + original content
-            finalHTML = summaryLine + originalContent;
-        } else {
-            // If no summary data, just use the cleaned original content
-            finalHTML = originalContent;
+        // 如果元素不存在，创建它
+        if (!summaryEl) {
+            summaryEl = document.createElement('div');
+            summaryEl.id = SELECTORS.SUMMARY_ID;
+            // 关键修改：插入到 wrapper 中，放在 descContent 之前
+            // 这样完全不干扰 descContent 内部的“展开更多”计算逻辑
+            wrapper.insertBefore(summaryEl, descContent);
         }
 
-        // Only update DOM if content actually changed
-        if (descSpan.innerHTML !== finalHTML) {
-            console.log("Bilibili Summary: Updating description HTML.");
-            descSpan.innerHTML = finalHTML;
+        // 仅当内容不同时更新，防止触发不必要的 DOM 变动
+        if (summaryEl.innerHTML !== summaryHTML) {
+            summaryEl.innerHTML = summaryHTML;
+            // console.log('[Bilibili Summary] 统计显示已更新');
         }
-
-        // Ensure parent div height is auto
-        if (basicInfoDiv.style.height !== 'auto') {
-            console.log("Bilibili Summary: Setting .basic-desc-info height to auto.");
-            basicInfoDiv.style.height = 'auto';
-        }
-
-         // Ensure observer is running on the description container
-         setupObserver(descContainer);
     }
 
-    // --- Function to set up the MutationObserver ---
-    function setupObserver(targetNode) {
-        if (!targetNode) return;
-        if (observer && observer.target === targetNode) return;
-        if (observer) observer.disconnect();
-
-        const config = { childList: true, subtree: true, characterData: true };
-        const callback = function(mutationsList, obs) {
-             let relevantMutation = false;
-             for (const mutation of mutationsList) {
-                  if (mutation.type === 'characterData' || mutation.type === 'childList') {
-                       if (targetNode.contains(mutation.target) || Array.from(mutation.addedNodes).some(n => targetNode.contains(n)) || Array.from(mutation.removedNodes).some(n => targetNode.contains(n))) {
-                           relevantMutation = true;
-                           break;
-                       }
-                   }
-             }
-             if (relevantMutation) {
-                 clearTimeout(debounceTimer);
-                 debounceTimer = setTimeout(() => {
-                     console.log("Bilibili Summary: Description mutation detected, re-validating summary and height.");
-                     updateDescriptionWithSummary(); // Re-run the logic
-                 }, 300);
-             }
-        };
-
-        observer = new MutationObserver(callback);
-        observer.observe(targetNode, config);
-        observer.target = targetNode;
-        console.log(`Bilibili Summary: MutationObserver started/restarted on ${DESCRIPTION_CONTAINER_SELECTOR}.`);
-    }
-
-    // --- Function to wait for initial elements ---
-    function waitForInitialElements(selectors, callback) {
-        const C_INTERVAL = 200;
-        const C_TIMEOUT = 25000;
-        let timePassed = 0;
-        if (window.biliSummaryInterval) clearInterval(window.biliSummaryInterval);
-
-        const interval = setInterval(function() {
-            timePassed += C_INTERVAL;
-            let allFound = true;
-            let missingSelector = null;
-            for (const selector of selectors) {
-                if (!document.querySelector(selector)) {
-                    allFound = false;
-                    missingSelector = selector;
-                    break;
-                }
+    // --- 观察者 ---
+    let debounceTimer = null;
+    const observer = new MutationObserver((mutations) => {
+        if (debounceTimer) clearTimeout(debounceTimer);
+        debounceTimer = setTimeout(() => {
+            // 检查列表是否存在，减少不必要的计算
+            if (document.querySelector('.video-pod__list')) {
+                renderSummary();
             }
+        }, 500);
+    });
 
-            if (allFound) {
-                clearInterval(interval);
-                window.biliSummaryInterval = null;
-                console.log("Bilibili Summary: Initial elements found for desc top update + height.");
-                setTimeout(callback, 500); // Run update logic
-            } else if (timePassed >= C_TIMEOUT) {
-                clearInterval(interval);
-                window.biliSummaryInterval = null;
-                console.warn(`Bilibili Summary: Timed out waiting for initial elements. Missing: ${missingSelector || 'unknown'}`);
-            }
-        }, C_INTERVAL);
-         window.biliSummaryInterval = interval;
+    function init() {
+        // 初始运行
+        renderSummary();
+        // 监听 body 变动 (B站是SPA，页面不刷新)
+        observer.observe(document.body, {
+            childList: true,
+            subtree: true
+        });
     }
 
-    // --- Start the process ---
-    // Wait for list (calc), desc span (target), desc container (observer), basic info div (height)
-    waitForInitialElements([
-        LIST_PRESENCE_SELECTOR,
-        DESCRIPTION_TEXT_SELECTOR,
-        DESCRIPTION_CONTAINER_SELECTOR,
-        DESC_BASIC_INFO_SELECTOR
-    ], updateDescriptionWithSummary);
+    init();
 
 })();
