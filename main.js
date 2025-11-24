@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Bilibili Video List Summary (Text Mode)
+// @name         Bilibili Video List Summary 
 // @namespace    http://tampermonkey.net/
-// @version      2.1
-// @description  在视频简介顶部显示合集统计信息（纯文本模式，修复B站原生报错）
+// @version      3.0
+// @description  在视频简介的第一行显示合集统计信息
 // @match        https://www.bilibili.com/video/*
 // @grant        none
 // @run-at       document-idle
@@ -12,40 +12,18 @@
 (function() {
     'use strict';
 
-    // --- 配置常量 ---
-    const SELECTORS = {
+    // --- 配置 ---
+    const CONSTANTS = {
         LIST_ITEMS: '.video-pod__list .stat-item.duration', // 列表时长元素
-        WRAPPER: '#v_desc', // 简介的最外层包裹器（插入位置的父级）
-        DESC_CONTENT: '.basic-desc-info', // 简介内容的敏感区域（插入位置的兄弟级）
-        SUMMARY_ID: 'bili-list-summary-text' // 我们的元素ID
+        // 这里的选择器非常关键：必须定位到简介文本的最内层容器
+        DESC_TEXT_CONTAINER: '#v_desc .basic-desc-info > span',
+        SUMMARY_ID: 'bili-list-summary-inline'
     };
-
-    // --- 样式注入 ---
-    const style = document.createElement('style');
-    style.innerHTML = `
-        /* 统计文本样式：仿原生，无框，一排字 */
-        #${SELECTORS.SUMMARY_ID} {
-            font-size: 14px;
-            color: #18191c; /* B站正文颜色 */
-            margin-bottom: 12px; /* 与下方简介拉开一点距离 */
-            line-height: 20px;
-            font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
-            font-weight: 500;
-        }
-        #${SELECTORS.SUMMARY_ID} span.gray-text {
-            color: #9499a0; /* 辅助文字灰色 */
-            margin: 0 4px;
-        }
-    `;
-    document.head.appendChild(style);
 
     // --- 核心逻辑 ---
 
-    /**
-     * 计算列表统计信息
-     */
     function calculateSummary() {
-        const durationElements = document.querySelectorAll(SELECTORS.LIST_ITEMS);
+        const durationElements = document.querySelectorAll(CONSTANTS.LIST_ITEMS);
         const count = durationElements.length;
 
         if (count === 0) return null;
@@ -73,66 +51,80 @@
 
         const avgSeconds = totalSeconds / count;
 
-        // 生成纯文本风格的 HTML
-        return `[合集统计] <span class="gray-text">·</span> 共 ${count} P <span class="gray-text">·</span> 总 ${formatTime(totalSeconds)} <span class="gray-text">·</span> 平均 ${formatTime(avgSeconds)}/P`;
+        // 返回纯文本数据
+        return { count, total: formatTime(totalSeconds), avg: formatTime(avgSeconds) };
     }
 
-    /**
-     * 渲染逻辑
-     */
     function renderSummary() {
-        // 1. 找到父容器 (#v_desc)
-        const wrapper = document.querySelector(SELECTORS.WRAPPER);
-        // 2. 找到兄弟元素 (.basic-desc-info)
-        // 注意：我们必须确保插在 basic-desc-info 之前，但不能插在它里面
-        const descContent = document.querySelector(SELECTORS.DESC_CONTENT);
+        // 1. 寻找简介文本的父级容器 (span)
+        const textContainer = document.querySelector(CONSTANTS.DESC_TEXT_CONTAINER);
+        if (!textContainer) return;
 
-        if (!wrapper || !descContent) return;
+        // 2. 检查是否已经插入过，避免重复插入导致死循环
+        let summarySpan = document.getElementById(CONSTANTS.SUMMARY_ID);
 
-        const summaryHTML = calculateSummary();
-        let summaryEl = document.getElementById(SELECTORS.SUMMARY_ID);
+        // 3. 计算数据
+        const data = calculateSummary();
 
-        // 如果没有合集数据（非合集视频），移除已存在的统计条
-        if (!summaryHTML) {
-            if (summaryEl) summaryEl.remove();
+        // 如果不是合集视频（无数据），且存在旧的统计标签，则移除
+        if (!data) {
+            if (summarySpan) summarySpan.remove();
             return;
         }
 
-        // 如果元素不存在，创建它
-        if (!summaryEl) {
-            summaryEl = document.createElement('div');
-            summaryEl.id = SELECTORS.SUMMARY_ID;
-            // 关键修改：插入到 wrapper 中，放在 descContent 之前
-            // 这样完全不干扰 descContent 内部的“展开更多”计算逻辑
-            wrapper.insertBefore(summaryEl, descContent);
+        // 4. 构建显示内容
+        // 注意：样式直接继承父级 (inherit)，加粗以示区分，最后加两个换行符模拟“第一行”效果
+        if (!summarySpan) {
+            summarySpan = document.createElement('span');
+            summarySpan.id = CONSTANTS.SUMMARY_ID;
+            summarySpan.style.fontWeight = 'bold';
+            summarySpan.style.color = 'inherit'; // 继承B站简介颜色
+            summarySpan.style.fontSize = 'inherit'; // 继承B站简介字体大小
+            summarySpan.style.lineHeight = 'inherit';
+            summarySpan.style.marginRight = '10px';
+
+            // 关键：插入到文本容器的最前面 (prepend)
+            // 这样它就变成了简介文本的一部分，不会破坏 DOM 树结构
+            textContainer.prepend(summarySpan);
         }
 
-        // 仅当内容不同时更新，防止触发不必要的 DOM 变动
-        if (summaryEl.innerHTML !== summaryHTML) {
-            summaryEl.innerHTML = summaryHTML;
-            // console.log('[Bilibili Summary] 统计显示已更新');
+        // 生成文本内容
+        const newText = `[合集统计] ${data.count}P · 总${data.total} · 平均${data.avg}/P`;
+
+        // 仅当内容变动时更新，防止光标跳动或反复重绘
+        // 后面加上 \n\n 也就是 HTML 中的 <br> 效果，让它独占一行
+        const finalHtml = `${newText}<br><br>`;
+
+        if (summarySpan.innerHTML !== finalHtml) {
+            summarySpan.innerHTML = finalHtml;
         }
     }
 
     // --- 观察者 ---
+    // B站简介点击“展开”后，DOM会被Vue重置，所以需要高频监测
     let debounceTimer = null;
     const observer = new MutationObserver((mutations) => {
+        // 过滤掉我们自己引起的变动，防止死循环
+        const isMyMutation = mutations.some(m => m.target.id === CONSTANTS.SUMMARY_ID || (m.target.parentNode && m.target.parentNode.id === CONSTANTS.SUMMARY_ID));
+        if (isMyMutation) return;
+
         if (debounceTimer) clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
-            // 检查列表是否存在，减少不必要的计算
             if (document.querySelector('.video-pod__list')) {
                 renderSummary();
             }
-        }, 500);
+        }, 200);
     });
 
     function init() {
-        // 初始运行
-        renderSummary();
-        // 监听 body 变动 (B站是SPA，页面不刷新)
+        // 延迟一点执行，确保B站主要框架加载完毕
+        setTimeout(renderSummary, 1000);
+
+        // 监听 body，应对 SPA 页面切换和简介展开/收起
         observer.observe(document.body, {
             childList: true,
-            subtree: true
+            subtree: true,
+            characterData: true // 监听文字变化
         });
     }
 
